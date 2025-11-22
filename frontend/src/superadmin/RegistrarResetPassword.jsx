@@ -18,6 +18,7 @@ import {
   ListItemIcon,
   ListItemText,
 } from "@mui/material";
+import { Switch, FormControlLabel } from "@mui/material";
 import {
   Visibility,
   VisibilityOff,
@@ -26,8 +27,9 @@ import {
   LockReset,
 } from "@mui/icons-material";
 import Unauthorized from "../components/Unauthorized";
-import LoadingOverlay from "../components/LoadingOverlay";
 import API_BASE_URL from "../apiConfig";
+import LoadingOverlay from "../components/LoadingOverlay";
+
 const passwordRules = [
   { label: "Minimum of 8 characters", test: (pw) => pw.length >= 8 },
   { label: "At least one lowercase letter (e.g. abc)", test: (pw) => /[a-z]/.test(pw) },
@@ -98,6 +100,48 @@ const RegistrarResetPassword = () => {
     message: "",
     severity: "success",
   });
+
+  const [otpRequired, setOtpRequired] = useState(true);
+
+  useEffect(() => {
+    const fetchOtpSetting = async () => {
+      try {
+        const person_id = localStorage.getItem("person_id");
+        const res = await axios.get(`${API_BASE_URL}/get-otp-setting/${person_id}`);
+        setOtpRequired(res.data.require_otp === 1);
+      } catch (err) {
+        console.error("Failed to load OTP setting", err);
+      }
+    };
+    fetchOtpSetting();
+  }, []);
+
+  const handleOtpToggle = async (event) => {
+    const newValue = event.target.checked;
+    setOtpRequired(newValue);
+
+    try {
+      const person_id = localStorage.getItem("person_id");
+      const res = await axios.post(`${API_BASE_URL}/update-otp-setting`, {
+        person_id,
+        require_otp: newValue ? 1 : 0,
+      });
+
+      setSnack({
+        open: true,
+        message: res.data.message,
+        severity: "success",
+      });
+
+    } catch (err) {
+      setSnack({
+        open: true,
+        message: err.response?.data?.message || "Failed to update OTP setting",
+        severity: "error",
+      });
+    }
+  };
+
 
   const pageId = 73;
 
@@ -188,28 +232,7 @@ const RegistrarResetPassword = () => {
     setShowPassword((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
-  // 🔒 Disable right-click and DevTools
-  useEffect(() => {
-    const prevent = (e) => e.preventDefault();
-    const blockKeys = (e) => {
-      const isBlockedKey =
-        e.key === "F12" ||
-        e.key === "F11" ||
-        (e.ctrlKey && e.shiftKey && (e.key.toLowerCase() === "i" || e.key.toLowerCase() === "j")) ||
-        (e.ctrlKey && e.key.toLowerCase() === "u") ||
-        (e.ctrlKey && e.key.toLowerCase() === "p");
-      if (isBlockedKey) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
-    document.addEventListener("contextmenu", prevent);
-    document.addEventListener("keydown", blockKeys);
-    return () => {
-      document.removeEventListener("contextmenu", prevent);
-      document.removeEventListener("keydown", blockKeys);
-    };
-  }, []);
+
 
   // 🔄 Access and loading handling
   if (loading || hasAccess === null) {
@@ -289,7 +312,19 @@ const RegistrarResetPassword = () => {
           </Box>
 
           <Divider sx={{ mb: 2 }} />
-
+          <Box mt={3}>
+             <InputLabel>SET OTP</InputLabel>
+            <FormControlLabel
+              control={
+                <Switch
+                  checked={otpRequired}
+                  onChange={handleOtpToggle}
+                  color="primary"
+                />
+              }
+              label="Require OTP during login"
+            />
+          </Box>
           {/* Form */}
           <form onSubmit={handleUpdate}>
             <Box mb={2}>
@@ -402,6 +437,8 @@ const RegistrarResetPassword = () => {
               Update Password
             </Button>
           </form>
+          {/* 🔀 OTP Toggle */}
+
         </Paper>
       </Box>
 

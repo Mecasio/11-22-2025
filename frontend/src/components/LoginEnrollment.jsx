@@ -87,13 +87,17 @@ const LoginEnrollment = ({ setIsAuthenticated }) => {
 
     try {
       setLoading(true);
-      
 
-      const res = await axios.post(`${API_BASE_URL}/login`, { email, password });
+      const apiUrl =
+        loginType === "applicant"
+          ? `${API_BASE_URL}/login_applicant`
+          : `${API_BASE_URL}/login`;
 
-      // 🔒 If locked, disable login button for 3 minutes (180 seconds)
+      const res = await axios.post(apiUrl, { email, password });
+
+      // 🔒 If locked, block login
       if (res.data.message?.includes("Locked")) {
-        if (!lockout) { // Prevent multiple timers
+        if (!lockout) {
           setLockout(true);
           setSnack({ open: true, message: res.data.message, severity: "error" });
 
@@ -112,7 +116,6 @@ const LoginEnrollment = ({ setIsAuthenticated }) => {
         return;
       }
 
-
       if (!res.data.success) {
         setSnack({
           open: true,
@@ -122,25 +125,58 @@ const LoginEnrollment = ({ setIsAuthenticated }) => {
         return;
       }
 
-      // ✅ Success case
+      // ✔ Save temporary response (for OTP)
       setTempLoginData(res.data);
+
+      // 📌 Applicants don't use OTP
       if (loginType === "applicant") {
         localStorage.setItem("token", res.data.token);
         localStorage.setItem("email", res.data.email);
         localStorage.setItem("role", res.data.role);
         localStorage.setItem("person_id", res.data.person_id);
+
         setIsAuthenticated(true);
         navigate("/applicant_dashboard");
         return;
       }
 
-      setShowOtpModal(true);
-      startResendTimer();
-      setSnack({
-        open: true,
-        message: "OTP sent to your email",
-        severity: "success",
-      });
+      // 🔥 OPTIONAL OTP CHECK
+      if (res.data.requireOtp === false) {
+        // 🚫 OTP NOT REQUIRED → Login instantly
+        localStorage.setItem("token", res.data.token);
+        localStorage.setItem("email", res.data.email);
+        localStorage.setItem("role", res.data.role);
+        localStorage.setItem("person_id", res.data.person_id);
+        localStorage.setItem("department", res.data.department || "");
+        localStorage.setItem("employee_id", res.data.employee_id);
+
+        setIsAuthenticated(true);
+
+        navigate(
+          res.data.role === "registrar"
+            ? "/registrar_dashboard"
+            : res.data.role === "faculty"
+              ? "/faculty_dashboard"
+              : "/student_dashboard"
+        );
+
+        return;
+      }
+
+      // 🔐 OTP REQUIRED → Show modal
+      if (res.data.requireOtp === true) {
+        setShowOtpModal(true);
+        startResendTimer();
+
+        setSnack({
+          open: true,
+          message: "OTP sent to your email",
+          severity: "success",
+        });
+
+        return;
+      }
+
     } catch (error) {
       const msg = error.response?.data?.message || "Login failed";
       setSnack({ open: true, message: msg, severity: "error" });
@@ -148,7 +184,6 @@ const LoginEnrollment = ({ setIsAuthenticated }) => {
       setLoading(false);
     }
   };
-
 
   const verifyOtp = async () => {
     try {
@@ -206,7 +241,7 @@ const LoginEnrollment = ({ setIsAuthenticated }) => {
   const resendOtp = async () => {
     try {
       setLoading2(true)
-      await axios.post(`http://192.168.50.2:5000/request-otp`, {
+      await axios.post(`${API_BASE_URL}/request-otp`, {
         email: tempLoginData.email,
       });
       setSnack({

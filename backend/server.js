@@ -3886,6 +3886,7 @@ app.post("/api/verify-password", async (req, res) => {
 
 app.post("/login", async (req, res) => {
   const { email: loginCredentials, password } = req.body;
+
   if (!loginCredentials || !password) {
     return res.status(400).json({ message: "All fields are required" });
   }
@@ -3894,55 +3895,63 @@ app.post("/login", async (req, res) => {
   const record = loginAttempts[loginCredentials] || { count: 0, lockUntil: null };
 
   if (record.lockUntil && record.lockUntil > now) {
-    const secondsLeft = Math.ceil((record.lockUntil - now) / 1000);
-    return res.json({ success: false, message: `Too many failed attempts. Try again in ${secondsLeft}s.` });
+    const sec = Math.ceil((record.lockUntil - now) / 1000);
+    return res.json({ success: false, message: `Too many failed attempts. Try again in ${sec}s.` });
   }
 
   try {
+    // --- FIX: added ua.require_otp ---
     const query = `(
-      SELECT 
-        ua.id AS account_id,
-        ua.person_id,
-        ua.email,
-        ua.password,
-        ua.employee_id,
-        ua.role,
-        NULL AS profile_image,
-        NULL AS fname,
-        NULL AS mname,
-        NULL AS lname,
-        ua.status AS status,
-        'user' AS source,
-        ua.dprtmnt_id,
-        dt.dprtmnt_name
-      FROM user_accounts AS ua
-      LEFT JOIN dprtmnt_table AS dt ON ua.dprtmnt_id = dt.dprtmnt_id
-      LEFT JOIN student_numbering_table AS snt ON snt.person_id = ua.person_id
-      WHERE (ua.email = ? OR snt.student_number = ?)
-    )
-    UNION ALL
-    (
-      SELECT 
-        ua.prof_id AS account_id,
-        ua.person_id,
-        ua.email,
-        ua.password,
-        ua.employee_id,
-        ua.role,
-        ua.profile_image,
-        ua.fname,
-        ua.mname,
-        ua.lname,
-        ua.status,
-        'prof' AS source,
-        NULL AS dprtmnt_id,
-        NULL AS dprtmnt_name
-      FROM prof_table AS ua
-      LEFT JOIN person_prof_table AS pt ON pt.person_id = ua.person_id
-      WHERE ua.email = ?
-    );`;
+  SELECT 
+    ua.id AS account_id,
+    ua.person_id,
+    ua.email,
+    ua.password,
+    ua.employee_id,
+    ua.role,
+    ua.require_otp,
+    NULL AS profile_image,
+    NULL AS fname,
+    NULL AS mname,
+    NULL AS lname,
+    ua.status AS status,
+    'user' AS source,
+    ua.dprtmnt_id,
+    dt.dprtmnt_name
+  FROM user_accounts AS ua
+  LEFT JOIN dprtmnt_table AS dt ON ua.dprtmnt_id = dt.dprtmnt_id
+  LEFT JOIN student_numbering_table AS snt ON snt.person_id = ua.person_id
+  WHERE (ua.email = ? OR snt.student_number = ?)
+)
+UNION ALL
+(
+  SELECT 
+    ua.prof_id AS account_id,
+    ua.person_id,
+    ua.email,
+    ua.password,
+    ua.employee_id,
+    ua.role,
+    NULL AS require_otp,    -- FIXED
+    ua.profile_image,
+    ua.fname,
+    ua.mname,
+    ua.lname,
+    ua.status,
+    'prof' AS source,
+    NULL AS dprtmnt_id,
+    NULL AS dprtmnt_name
+  FROM prof_table AS ua
+  LEFT JOIN person_prof_table AS pt ON pt.person_id = ua.person_id
+  WHERE ua.email = ?
+);`;
 
-    const [results] = await db3.query(query, [loginCredentials, loginCredentials, loginCredentials]);
+
+    const [results] = await db3.query(query, [
+      loginCredentials,
+      loginCredentials,
+      loginCredentials,
+    ]);
 
     if (results.length === 0) {
       record.count++;
@@ -3957,6 +3966,7 @@ app.post("/login", async (req, res) => {
 
     const user = results[0];
 
+    // --- password check ---
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
       record.count++;
@@ -3964,78 +3974,102 @@ app.post("/login", async (req, res) => {
 
       if (record.count >= 3) {
         record.lockUntil = now + 3 * 60 * 1000;
-        loginAttempts[loginCredentials] = record;
         return res.json({ success: false, message: "Too many failed attempts. Locked for 3 minutes." });
       }
 
       loginAttempts[loginCredentials] = record;
-      return res.json({ success: false, message: `Invalid Password or Email, You have ${remaining} attempt(s) remaining.`, remaining });
+      return res.json({
+        success: false,
+        message: `Invalid Password or Email, You have ${remaining} attempt(s) remaining.`,
+        remaining,
+      });
     }
 
+    // --- status check ---
     if ((user.source === "prof" || user.source === "user") && user.status === 0) {
       return res.json({ success: false, message: "The user didn’t exist or account is inactive" });
     }
 
-    // ✅ Generate OTP
-    const otp = generateOTP();
-    otpStore[user.email] = {
-      otp,
-      expiresAt: now + 5 * 60 * 1000, // 5 minutes
-      cooldownUntil: now + 5 * 60 * 1000,
-    };
-
-    try {
-      // ✅ Fetch short_term from company_settings
-      const [companyResult] = await db.query("SELECT short_term FROM company_settings WHERE id = 1");
-      const shortTerm = companyResult?.[0]?.short_term || "School";
-
-      // ✅ Configure mail transport
-      const transporter = nodemailer.createTransport({
-        host: "smtp.gmail.com",
-        port: 465,
-        secure: true,
-        auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
-      });
-
-      // ✅ Use dynamic short term in subject and body
-      await transporter.sendMail({
-        from: `"${shortTerm} - OTP Verification" <${process.env.EMAIL_USER}>`,
-        to: user.email,
-        subject: `${shortTerm} OTP Code`,
-        text: `Your ${shortTerm} - OTP is: ${otp} (Valid for 5 minutes)`,
-      });
-
-      console.log(`✅ Sent ${shortTerm} OTP to ${user.email}`);
-    } catch (err) {
-      console.error("⚠️ Failed to send OTP email:", err.message);
-    }
-
-    // ✅ Generate JWT
+    // --- FIX: generate JWT BEFORE OTP handling ---
     const token = webtoken.sign(
-      { person_id: user.person_id, employee_id: user.employee_id, email: user.email, role: user.role, department: user.department },
+      {
+        person_id: user.person_id,
+        employee_id: user.employee_id,
+        email: user.email,
+        role: user.role,
+        department: user.dprtmnt_id,
+      },
       process.env.JWT_SECRET,
       { expiresIn: "24h" }
     );
 
-    res.json({
-      message: "OTP sent to registered email",
-      token,
+    // --- OPTIONAL OTP LOGIC ---
+    if (user.require_otp === 1) {
+      const otp = generateOTP();
+
+      otpStore[user.email] = {
+        otp,
+        expiresAt: now + 5 * 60 * 1000,
+        cooldownUntil: now + 5 * 60 * 1000,
+      };
+
+      try {
+        const [companyResult] = await db.query("SELECT short_term FROM company_settings WHERE id = 1");
+        const shortTerm = companyResult?.[0]?.short_term || "School";
+
+        const transporter = nodemailer.createTransport({
+          host: "smtp.gmail.com",
+          port: 465,
+          secure: true,
+          auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS,
+          },
+        });
+
+        await transporter.sendMail({
+          from: `"${shortTerm} - OTP Verification" <${process.env.EMAIL_USER}>`,
+          to: user.email,
+          subject: `${shortTerm} OTP Code`,
+          text: `Your OTP is: ${otp} (Valid for 5 minutes)`,
+        });
+      } catch (err) {
+        console.error("OTP Email Error:", err.message);
+      }
+
+      return res.json({
+        success: true,
+        requireOtp: true,
+        message: "OTP sent to your email",
+        token,
+        email: user.email,
+        role: user.role,
+        person_id: user.person_id,
+        employee_id: user.employee_id,
+        department: user.dprtmnt_id,
+      });
+    }
+
+    // -----------------------
+    // NO OTP REQUIRED
+    // -----------------------
+    return res.json({
       success: true,
+      requireOtp: false,
+      message: "Login success. OTP not required.",
+      token,
       email: user.email,
       role: user.role,
-      employee_id: user.employee_id,
       person_id: user.person_id,
+      employee_id: user.employee_id,
       department: user.dprtmnt_id,
     });
 
-    console.log("User Employee ID", user.employee_id, typeof user.employee_id);
   } catch (error) {
     console.error("Login error:", error);
-    res.status(500).json({ message: "Server error during login" });
+    return res.status(500).json({ message: "Server error during login" });
   }
 });
-
-
 
 // ----------------- LOGIN (Applicant) -----------------
 app.post("/login_applicant", async (req, res) => {
@@ -15078,6 +15112,57 @@ app.get("/api/person/:id", (req, res) => {
     res.json(result[0]);
   });
 });
+
+app.get("/get-otp-setting/:person_id", async (req, res) => {
+  const { person_id } = req.params;
+
+  try {
+    const [rows] = await db3.query(
+      "SELECT require_otp FROM user_accounts WHERE person_id = ?",
+      [person_id]
+    );
+
+    if (rows.length === 0) {
+      return res.json({ require_otp: 0 });
+    }
+
+    res.json({ require_otp: rows[0].require_otp });
+  } catch (err) {
+    console.error("OTP fetch error:", err);
+    res.status(500).json({ message: "Server error loading OTP setting" });
+  }
+});
+
+app.post("/update-otp-setting", async (req, res) => {
+  const { person_id, require_otp } = req.body;
+
+  if (!person_id) {
+    return res.status(400).json({ message: "Missing person_id" });
+  }
+
+  try {
+    const [result] = await db3.query(
+      "UPDATE user_accounts SET require_otp = ? WHERE person_id = ?",
+      [require_otp, person_id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    res.json({
+      success: true,
+      message: require_otp == 1
+        ? "OTP has been enabled for your account."
+        : "OTP has been disabled for your account."
+    });
+
+  } catch (err) {
+    console.error("Failed to update OTP:", err);
+    res.status(500).json({ message: "Server error updating OTP setting" });
+  }
+});
+
 
 
 const PORT = process.env.WEB_PORT || 5000;
